@@ -110,7 +110,33 @@ class Context {
 const aliasRegistry = new Map<string, Parser>();
 const FUNCTION_PREFIX = "___parser_";
 
-interface ParserOptions {
+// Utility type to extract only keys from TObject which are of type TType.
+type KeysOfType<TObject, TType> = {
+  // Iterate through all keys of TObject.
+  // If value under key TKey has type TType, then put TKey in that place. If not, put never.
+  [TKey in keyof TObject]: TObject[TKey] extends TType ? TKey : never;
+};
+
+// Base type of "tag" option in ParserOptions type.
+type ParserTag<TValue> =
+  | KeysOfType<TValue, number>
+  | ((value: TValue) => number);
+// Base type of "choices" option in ParserOptions type.
+type ParserChoices = Record<number, string | Parser<unknown>>;
+
+// Type for specifying custom options for parser.
+type ParserOptions<
+  // Type parameter, which describes current value, that is being constructed during parsing.
+  TValue,
+  // Type parameter, describes which value is being used to pick item from "choices".
+  // Inheritance is used to restrict input - user will specify concrete value, that will be used
+  //   for correct type construction.
+  TTag extends ParserTag<TValue> | undefined = undefined,
+  // Type parameter, describes possible choices to pick from.
+  // Same as for TTag value parameter, inheritance is being used to restrict user-specified type
+  //   and get specific value after.
+  TChoices extends ParserChoices = ParserChoices
+> = {
   length?: number | string | ((item: any) => number);
   assert?: number | string | ((item: number | string) => boolean);
   lengthInBytes?: number | string | ((item: any) => number);
@@ -119,16 +145,16 @@ interface ParserOptions {
   encoding?: string;
   readUntil?: "eof" | ((item: any, buffer: Buffer) => boolean);
   greedy?: boolean;
-  choices?: { [key: number]: string | Parser };
+  choices?: TChoices;
   defaultChoice?: string | Parser;
   zeroTerminated?: boolean;
   clone?: boolean;
   stripNull?: boolean;
   key?: string;
-  tag?: string | ((item: any) => number);
+  tag?: TTag;
   offset?: number | string | ((item: any) => number);
   wrapper?: (buffer: Buffer) => Buffer;
-}
+};
 
 type Types = PrimitiveTypes | ComplexTypes;
 
@@ -264,6 +290,146 @@ const PRIMITIVE_NAMES: { [key in PrimitiveTypes]: string } = {
   doublebe: "Float64",
 };
 
+// Utility type, used to extract concrete value from choice.
+// Automatically handles specific "self" and "stop" string literals:
+//   "self" - use same parser once more, which results in same value as before.
+//   "stop" - stop parsing, results in "undefined" type.
+// Other string literals could not be handled correctly, because named parser
+//   are unknown during compile-time.
+type ChoiceToValue<TChoice, TSelfValue> = TChoice extends Parser<
+  infer TParserValue
+>
+  ? TParserValue
+  : TChoice extends "self"
+  ? TSelfValue
+  : TChoice extends "stop"
+  ? undefined
+  : unknown;
+
+/**
+ * Utility type, which constructs union type of all possibilities, from choices type.
+ * Output value will be written to current object.
+ * Limitations:
+ *   - using named parsers will result in "unknown" type.
+ *   - if TTag is function, union type without split on variable will be generated.
+ * @example
+ * If user specified TChoices type as:
+ * ```ts
+ * type TChoices = {
+ *   0: Parser<{ value: string }>;
+ *   1: Parser<{ otherValue: number }>;
+ *   2: 'unknown-parser'
+ * }
+ * ```
+ * TCurrentValue type as:
+ * ```ts
+ * type TCurrentValue = {
+ *   someTag: number;
+ * }
+ * ```
+ * And TTag as:
+ * ```ts
+ * type TTag = 'someTag';
+ * ```
+ * Then, return type will be:
+ * ```ts
+ * type Output = {
+ *   someTag: 0;
+ *   value: string;
+ * } | {
+ *   someTag: 1;
+ *   otherValue: number;
+ * } | {
+ *   someTag: 2;
+ * } & unknown; // limitation - cannot distinguish type.
+ * ```
+ * As you can see from the example above, one limitation exist:
+ *   When named parsers are being used, type cannot be distinguished,
+ *   because named parsers are not accessible during compile-time.
+ * @example
+ * If TChoices is:
+ * ```ts
+ * type TChoices = {
+ *   0: Parser<{ value: string }>;
+ *   1: Parser<{ anotherValue: number }>;
+ * }
+ * ```
+ * TCurrentValue is:
+ * ```ts
+ * type TCurrentValue = {
+ *   someValue: number;
+ * }
+ * ```
+ * And TTag is:
+ * ```ts
+ * type TTag = (value: TCurrentValue) => number;
+ * ```
+ * Output type will be:
+ * ```ts
+ * type Output = {
+ *   someValue: number;
+ *   value: string;
+ * } | {
+ *   someValue: number;
+ *   anotherValue: number;
+ * }
+ * ```
+ * From the example above, another limitation occurs:
+ *   When TTag is "function", the type will not be splitted by variable. As a result,
+ *   output type could have all variables from all choices at one time, what is not true.
+ */
+type ChoicesToPossibleValues<
+  // Type parameter, used to describe current parser value.
+  TCurrentValue,
+  // Type parameter, describes the criteria to choose one of specified choices.
+  TTag extends ParserTag<TCurrentValue>,
+  // Type parameter, describes all available choices.
+  TChoices extends ParserChoices
+> = {
+  // Iterating through all possible keys from TChoices type.
+  [TKey in keyof TChoices]: TTag extends keyof TChoices
+    ? // If TTag is a key of TChoices object, more specific type could be generated.
+      // Removing TTag key from object, because it has more general type.
+      Omit<TCurrentValue, TTag> &
+        // Returning back TTag key to object with specific literal value.
+        Record<TTag, TKey> &
+        // Merging TCurrentValue type with properties from choice.
+        ChoiceToValue<TChoices[TKey], TCurrentValue>
+    : // If TTag is a function, specific type could not be generated - using more general type.
+      TCurrentValue & ChoiceToValue<TChoices[TKey], TCurrentValue>;
+  // Joining all values from constructed object, to get union type.
+}[keyof TChoices];
+
+/**
+ * Utility type, which constructs union type of all possibilities, from choices type.
+ * Output value will be written into new variable.
+ * Same behavior and limitations as ChoicesToPossibleValues, just output is being
+ *   written into specified variable. @see {ChoicesToPossibleValues}
+ */
+type ChoicesToPossibleFieldValues<
+  // Type parameter, used to describe current parser value.
+  TCurrentValue,
+  // Type parameter, describes the criteria to choose one of specified choices.
+  TTag extends ParserTag<TCurrentValue>,
+  // Type parameter, describes all available choices.
+  TChoices extends ParserChoices,
+  // Type parameter, which describes destination of constructed possibilities type.
+  TVariableName extends string
+> = {
+  // Iterating through all possible keys from TChoices type.
+  [TKey in keyof TChoices]: TTag extends keyof TChoices
+    ? // If TTag is a key of TChoices object, more specific type could be generated.
+      // Removing TTag key from object, because it has more general type.
+      Omit<TCurrentValue, TTag> &
+        // Returning back TTag key to object with specific literal value.
+        Record<TTag, TKey> &
+        // Adding new variable to TCurrentType, which has name TVariableName, with picked choice.
+        Record<TVariableName, ChoiceToValue<TChoices[TKey], TCurrentValue>>
+    : // If TTag is a function, specific type could not be generated - using more general type.
+      TCurrentValue &
+        Record<TVariableName, ChoiceToValue<TChoices[TKey], TCurrentValue>>;
+};
+
 const PRIMITIVE_LITTLE_ENDIANS: { [key in PrimitiveTypes]: boolean } = {
   uint8: false,
   uint16le: true,
@@ -288,7 +454,7 @@ const PRIMITIVE_LITTLE_ENDIANS: { [key in PrimitiveTypes]: boolean } = {
 export class Parser<T = {}> {
   varName = "";
   type: Types = "";
-  options: ParserOptions = {};
+  options: ParserOptions<T> = {};
   next?: Parser;
   head?: Parser;
   compiled?: Function;
@@ -317,7 +483,7 @@ export class Parser<T = {}> {
   private primitiveN<Type extends PrimitiveTypes, K extends string>(
     type: Type,
     varName: K,
-    options: ParserOptions
+    options: ParserOptions<T>
   ): Parser<T & Record<K, number>> {
     return this.setNextParser(type, varName, options);
   }
@@ -326,59 +492,59 @@ export class Parser<T = {}> {
     return (type + this.endian.toLowerCase()) as PrimitiveTypes;
   }
 
-  uint8<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint8<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("uint8", varName, options);
   }
 
-  uint16<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint16<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN(this.useThisEndian("uint16"), varName, options);
   }
 
-  uint16le<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint16le<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("uint16le", varName, options);
   }
 
-  uint16be<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint16be<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("uint16be", varName, options);
   }
 
-  uint32<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint32<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN(this.useThisEndian("uint32"), varName, options);
   }
 
-  uint32le<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint32le<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("uint32le", varName, options);
   }
 
-  uint32be<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint32be<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("uint32be", varName, options);
   }
 
-  int8<K extends string>(varName: K, options: ParserOptions = {}) {
+  int8<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("int8", varName, options);
   }
 
-  int16<K extends string>(varName: K, options: ParserOptions = {}) {
+  int16<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN(this.useThisEndian("int16"), varName, options);
   }
 
-  int16le<K extends string>(varName: K, options: ParserOptions = {}) {
+  int16le<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("int16le", varName, options);
   }
 
-  int16be<K extends string>(varName: K, options: ParserOptions = {}) {
+  int16be<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("int16be", varName, options);
   }
 
-  int32<K extends string>(varName: K, options: ParserOptions = {}) {
+  int32<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN(this.useThisEndian("int32"), varName, options);
   }
 
-  int32le<K extends string>(varName: K, options: ParserOptions = {}) {
+  int32le<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("int32le", varName, options);
   }
 
-  int32be<K extends string>(varName: K, options: ParserOptions = {}) {
+  int32be<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("int32be", varName, options);
   }
 
@@ -387,182 +553,186 @@ export class Parser<T = {}> {
       throw new Error("BigInt64 is unsupported on this runtime");
   }
 
-  int64<K extends string>(varName: K, options: ParserOptions = {}) {
+  int64<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     this.bigIntVersionCheck();
     return this.primitiveN(this.useThisEndian("int64"), varName, options);
   }
 
-  int64be<K extends string>(varName: K, options: ParserOptions = {}) {
+  int64be<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     this.bigIntVersionCheck();
     return this.primitiveN("int64be", varName, options);
   }
 
-  int64le<K extends string>(varName: K, options: ParserOptions = {}) {
+  int64le<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     this.bigIntVersionCheck();
     return this.primitiveN("int64le", varName, options);
   }
 
-  uint64<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint64<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     this.bigIntVersionCheck();
     return this.primitiveN(this.useThisEndian("uint64"), varName, options);
   }
 
-  uint64be<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint64be<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     this.bigIntVersionCheck();
     return this.primitiveN("uint64be", varName, options);
   }
 
-  uint64le<K extends string>(varName: K, options: ParserOptions = {}) {
+  uint64le<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     this.bigIntVersionCheck();
     return this.primitiveN("uint64le", varName, options);
   }
 
-  floatle<K extends string>(varName: K, options: ParserOptions = {}) {
+  floatle<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("floatle", varName, options);
   }
 
-  floatbe<K extends string>(varName: K, options: ParserOptions = {}) {
+  floatbe<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("floatbe", varName, options);
   }
 
-  doublele<K extends string>(varName: K, options: ParserOptions = {}) {
+  doublele<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("doublele", varName, options);
   }
 
-  doublebe<K extends string>(varName: K, options: ParserOptions = {}) {
+  doublebe<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.primitiveN("doublebe", varName, options);
   }
 
-  private bitN<K extends string>(size: BitSizes, varName: K, options: ParserOptions) {
+  private bitN<K extends string>(
+    size: BitSizes,
+    varName: K,
+    options: ParserOptions<T>
+  ) {
     options.length = size;
     return this.setNextParser("bit", varName, options);
   }
 
-  bit1<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit1<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(1, varName, options);
   }
 
-  bit2<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit2<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(2, varName, options);
   }
 
-  bit3<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit3<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(3, varName, options);
   }
 
-  bit4<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit4<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(4, varName, options);
   }
 
-  bit5<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit5<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(5, varName, options);
   }
 
-  bit6<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit6<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(6, varName, options);
   }
 
-  bit7<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit7<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(7, varName, options);
   }
 
-  bit8<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit8<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(8, varName, options);
   }
 
-  bit9<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit9<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(9, varName, options);
   }
 
-  bit10<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit10<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(10, varName, options);
   }
 
-  bit11<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit11<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(11, varName, options);
   }
 
-  bit12<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit12<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(12, varName, options);
   }
 
-  bit13<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit13<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(13, varName, options);
   }
 
-  bit14<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit14<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(14, varName, options);
   }
 
-  bit15<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit15<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(15, varName, options);
   }
 
-  bit16<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit16<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(16, varName, options);
   }
 
-  bit17<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit17<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(17, varName, options);
   }
 
-  bit18<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit18<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(18, varName, options);
   }
 
-  bit19<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit19<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(19, varName, options);
   }
 
-  bit20<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit20<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(20, varName, options);
   }
 
-  bit21<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit21<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(21, varName, options);
   }
 
-  bit22<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit22<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(22, varName, options);
   }
 
-  bit23<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit23<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(23, varName, options);
   }
 
-  bit24<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit24<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(24, varName, options);
   }
 
-  bit25<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit25<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(25, varName, options);
   }
 
-  bit26<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit26<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(26, varName, options);
   }
 
-  bit27<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit27<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(27, varName, options);
   }
 
-  bit28<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit28<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(28, varName, options);
   }
 
-  bit29<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit29<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(29, varName, options);
   }
 
-  bit30<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit30<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(30, varName, options);
   }
 
-  bit31<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit31<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(31, varName, options);
   }
 
-  bit32<K extends string>(varName: K, options: ParserOptions = {}) {
+  bit32<K extends string>(varName: K, options: ParserOptions<T> = {}) {
     return this.bitN(32, varName, options);
   }
 
@@ -572,11 +742,17 @@ export class Parser<T = {}> {
     return this;
   }
 
-  skip(length: ParserOptions["length"], options: ParserOptions = {}): this {
+  skip(
+    length: ParserOptions<T>["length"],
+    options: ParserOptions<T> = {}
+  ): this {
     return this.seek(length, options);
   }
 
-  seek(relOffset: ParserOptions["length"], options: ParserOptions = {}): this {
+  seek(
+    relOffset: ParserOptions<T>["length"],
+    options: ParserOptions<T> = {}
+  ): this {
     if (options.assert) {
       throw new Error("assert option on seek is not allowed.");
     }
@@ -584,7 +760,7 @@ export class Parser<T = {}> {
     return this.setNextParser("seek", "", { length: relOffset });
   }
 
-  string<K extends string>(varName: K, options: ParserOptions) {
+  string<K extends string>(varName: K, options: ParserOptions<T>) {
     if (!options.zeroTerminated && !options.length && !options.greedy) {
       throw new Error(
         "One of length, zeroTerminated, or greedy must be defined for string."
@@ -605,10 +781,12 @@ export class Parser<T = {}> {
 
     options.encoding = options.encoding || "utf8";
 
-    return this.setNextParser("string", varName, options) as unknown as Parser<T & Record<K, string>>;
+    return this.setNextParser("string", varName, options) as unknown as Parser<
+      T & Record<K, string>
+    >;
   }
 
-  buffer<K extends string>(varName: K, options: ParserOptions) {
+  buffer<K extends string>(varName: K, options: ParserOptions<T>) {
     if (!options.length && !options.readUntil) {
       throw new Error("length or readUntil must be defined for buffer.");
     }
@@ -616,7 +794,7 @@ export class Parser<T = {}> {
     return this.setNextParser("buffer", varName, options);
   }
 
-  wrapped<K extends string>(varName: K, options: ParserOptions): this {
+  wrapped<K extends string>(varName: K, options: ParserOptions<T>): this {
     if (!options.length && !options.readUntil) {
       throw new Error("length or readUntil must be defined for wrapped.");
     }
@@ -628,7 +806,7 @@ export class Parser<T = {}> {
     return this.setNextParser("wrapper", varName, options);
   }
 
-  array<K extends string>(varName: K, options: ParserOptions) {
+  array<K extends string>(varName: K, options: ParserOptions<T>) {
     if (!options.readUntil && !options.length && !options.lengthInBytes) {
       throw new Error(
         "One of readUntil, length and lengthInBytes must be defined for array."
@@ -650,7 +828,28 @@ export class Parser<T = {}> {
     return this.setNextParser("array", varName, options);
   }
 
-  choice<K extends string>(varName: string | ParserOptions, options?: ParserOptions): this {
+  choice<TTag extends ParserTag<T>, TChoices extends ParserChoices>(
+    options: ParserOptions<T, TTag, TChoices>
+  ): Parser<ChoicesToPossibleValues<T, TTag, TChoices>>;
+
+  // prettier-ignore required because prettier formats code in weird way, that breaks syntax highlight
+  choice<
+    K extends string,
+    TTag extends ParserTag<T>,
+    TChoices extends ParserChoices
+  >(
+    varName: K,
+    options: ParserOptions<T, TTag, TChoices>
+  ): Parser<ChoicesToPossibleFieldValues<T, TTag, TChoices, K>>;
+
+  // prettier-ignore
+  choice<K extends string, TTag extends ParserTag<T>, TChoices extends ParserChoices>(
+    varName: K | ParserOptions<T, TTag, TChoices>,
+    options?: ParserOptions<T, TTag, TChoices>
+    // prettier-ignore
+  ): 
+  Parser<ChoicesToPossibleValues<T, TTag, TChoices>> | 
+  Parser<ChoicesToPossibleFieldValues<T, TTag, TChoices, K>> {
     if (typeof options !== "object" && typeof varName === "object") {
       options = varName;
       varName = "";
@@ -685,10 +884,14 @@ export class Parser<T = {}> {
       }
     }
 
-    return this.setNextParser("choice", varName as string, options);
+    return this.setNextParser(
+      "choice",
+      varName as K,
+      options as unknown as ParserOptions<T>
+    ) as unknown as Parser<ChoicesToPossibleValues<T, TTag, TChoices>>;
   }
 
-  nest(varName: string | ParserOptions, options?: ParserOptions): this {
+  nest(varName: string | ParserOptions<T>, options?: ParserOptions<T>): this {
     if (typeof options !== "object" && typeof varName === "object") {
       options = varName;
       varName = "";
@@ -711,7 +914,7 @@ export class Parser<T = {}> {
     return this.setNextParser("nest", varName as string, options || {});
   }
 
-  pointer(varName: string, options: ParserOptions): this {
+  pointer(varName: string, options: ParserOptions<T>): this {
     if (!options.offset) {
       throw new Error("offset is required for pointer.");
     }
@@ -731,7 +934,7 @@ export class Parser<T = {}> {
     return this.setNextParser("pointer", varName, options);
   }
 
-  saveOffset(varName: string, options: ParserOptions = {}): this {
+  saveOffset(varName: string, options: ParserOptions<T> = {}): this {
     return this.setNextParser("saveOffset", varName, options);
   }
 
@@ -915,8 +1118,10 @@ export class Parser<T = {}> {
   private setNextParser<K extends Types, V extends string>(
     type: K,
     varName: V,
-    options: ParserOptions
-  ): K extends keyof AllTypesMapper ? Parser<T & Record<V, AllTypesMapper[K]>> : this {
+    options: ParserOptions<T>
+  ): K extends keyof AllTypesMapper
+    ? Parser<T & Record<V, AllTypesMapper[K]>>
+    : this {
     const parser = new Parser();
 
     parser.type = type;
@@ -931,7 +1136,9 @@ export class Parser<T = {}> {
     }
     this.head = parser;
 
-    return this as (K extends keyof AllTypesMapper ? Parser<T & Record<V, AllTypesMapper[K]>> : this);
+    return this as K extends keyof AllTypesMapper
+      ? Parser<T & Record<V, AllTypesMapper[K]>>
+      : this;
   }
 
   // Call code generator for this parser
@@ -1382,7 +1589,7 @@ export class Parser<T = {}> {
       const type = this.options.choices[tag];
 
       ctx.pushCode(`case ${tag}:`);
-      this.generateChoiceCase(ctx, this.varName, type);
+      this.generateChoiceCase(ctx, this.varName, type as Parser<{}>);
       ctx.pushCode("break;");
     }
     ctx.pushCode("default:");
