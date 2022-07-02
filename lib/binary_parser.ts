@@ -110,6 +110,92 @@ class Context {
 const aliasRegistry = new Map<string, Parser>();
 const FUNCTION_PREFIX = "___parser_";
 
+type LengthProperty<TParserValue> = number | keyof TParserValue | ((item: TParserValue) => number);
+
+/**
+ * Options that can be used in all parsers.
+ */
+export type CommonParserOptions<TInputValue, TOutputValue> = {
+  /**
+   * Function that transforms the parsed value into a more desired form.
+   */
+  formatter?: (value: TInputValue) => TOutputValue;
+  /**
+   * Do assertion on the parsed result (useful for checking magic numbers and so on).
+   * If `assert` is a `string` or `number`, the actual parsed result will be compared
+   * with it with `===` (strict equality check), and an exception is thrown if they mismatch.
+   * On the other hand, if `assert` is a function, that function is executed with one
+   * argument (parsed result) and if it returns false, an exception is thrown.
+   */
+  assert?:
+    | ((value: TInputValue) => boolean)
+    | (TInputValue extends string | number ? TInputValue : never);
+};
+
+/**
+ * Options for "string" parser.
+ */
+export type StringParserOptions<TParserValue, TOutputValue> = {
+  /**
+   * Specify which encoding to use.
+   * Supported encodings include "hex" and all encodings supported by TextDecoder.
+   * @see {@link https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder/encoding}
+   * @default "utf-8"
+   */
+  encoding?: string;
+  /**
+   * Length of the string. Can be a number, string or a function.
+   * Use number for statically sized arrays, string to reference another variable
+   * and function to do some calculation.
+   */
+  length?: LengthProperty<TParserValue>;
+  /**
+   * If true, then this parser reads until it reaches zero.
+   * @default false
+   */
+  zeroTerminated?: boolean;
+  /**
+   * If true, then this parser reads until it reaches the end of the buffer.
+   * Will consume zero-bytes.
+   * @default false
+   */
+  greedy?: boolean;
+  /**
+   * If true, then strip null characters from end of the string.
+   * Must be used with length.
+   */
+  stripNull?: boolean;
+} & CommonParserOptions<string, TOutputValue>;
+
+/**
+ * Options for "buffer" parser.
+ */
+export type BufferParserOptions<TParserValue, TOutputValue> = {
+  /**
+   * By default, `buffer(name [,options])` returns a new buffer which
+   *   references the same memory as the parser input, but offset and
+   *   cropped by a certain range. 
+   * If this option is true, input buffer will be cloned and a new buffer 
+   *   referencing a new memory region is returned.
+   * @default false
+   */
+  clone?: boolean;
+  /** 
+   * Length of the buffer. Can be a number, string or a function. 
+   * Use number for statically sized buffers, string to reference another
+   *   variable and function to do some calculation.
+   * Either `length` or `readUntil` is required.
+   */
+  length?: LengthProperty<TParserValue>;
+  /**
+   * If "eof", then this parser will read till it reaches the end of the 
+   *   Buffer/Uint8Array object. If it is a function, this parser will read 
+   *   the buffer until the function returns true.
+   * Either `length` or readUntil is required. 
+   */
+  readUntil?: "eof" | ((item: number, buffer: Buffer) => boolean);
+} & CommonParserOptions<Buffer, TOutputValue>;
+
 // Utility type to extract only keys from TObject which are of type TType.
 type KeysOfType<TObject, TType> = {
   // Iterate through all keys of TObject.
@@ -119,9 +205,7 @@ type KeysOfType<TObject, TType> = {
 }[keyof TObject];
 
 // Base type of "tag" option in ParserOptions type.
-type ParserTag<TValue> =
-  | KeysOfType<TValue, number>
-  | ((value: any) => number);
+type ParserTag<TValue> = KeysOfType<TValue, number> | ((value: any) => number);
 // Base type for entry of "choices" option in ParserOptions type.
 type ParserChoice<TValue> = string | Parser<TValue>;
 // Base type of "choices" option in ParserOptions type.
@@ -508,11 +592,11 @@ export class Parser<T = {}> {
     ctx.pushCode(`offset += ${PRIMITIVE_SIZES[type]};`);
   }
 
-  private primitiveN<Type extends PrimitiveTypes, K extends string>(
-    type: Type,
-    varName: K,
-    options: ParserOptions<T, any, any, any, any>
-  ): Parser<T & Record<K, number>> {
+  private primitiveN<TVariableName extends string, TOutputValue = number>(
+    type: PrimitiveTypes,
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue>
+  ): Parser<T & Record<TVariableName, number>> {
     return this.setNextParser(type, varName, options);
   }
 
@@ -520,59 +604,101 @@ export class Parser<T = {}> {
     return (type + this.endian.toLowerCase()) as PrimitiveTypes;
   }
 
-  uint8<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint8<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("uint8", varName, options);
   }
 
-  uint16<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint16<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN(this.useThisEndian("uint16"), varName, options);
   }
 
-  uint16le<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint16le<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("uint16le", varName, options);
   }
 
-  uint16be<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint16be<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("uint16be", varName, options);
   }
 
-  uint32<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint32<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN(this.useThisEndian("uint32"), varName, options);
   }
 
-  uint32le<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint32le<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("uint32le", varName, options);
   }
 
-  uint32be<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint32be<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("uint32be", varName, options);
   }
 
-  int8<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int8<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("int8", varName, options);
   }
 
-  int16<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int16<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN(this.useThisEndian("int16"), varName, options);
   }
 
-  int16le<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int16le<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("int16le", varName, options);
   }
 
-  int16be<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int16be<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("int16be", varName, options);
   }
 
-  int32<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int32<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN(this.useThisEndian("int32"), varName, options);
   }
 
-  int32le<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int32le<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("int32le", varName, options);
   }
 
-  int32be<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int32be<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("int32be", varName, options);
   }
 
@@ -581,186 +707,312 @@ export class Parser<T = {}> {
       throw new Error("BigInt64 is unsupported on this runtime");
   }
 
-  int64<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int64<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     this.bigIntVersionCheck();
     return this.primitiveN(this.useThisEndian("int64"), varName, options);
   }
 
-  int64be<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int64be<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     this.bigIntVersionCheck();
     return this.primitiveN("int64be", varName, options);
   }
 
-  int64le<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  int64le<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     this.bigIntVersionCheck();
     return this.primitiveN("int64le", varName, options);
   }
 
-  uint64<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint64<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     this.bigIntVersionCheck();
     return this.primitiveN(this.useThisEndian("uint64"), varName, options);
   }
 
-  uint64be<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint64be<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     this.bigIntVersionCheck();
     return this.primitiveN("uint64be", varName, options);
   }
 
-  uint64le<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  uint64le<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     this.bigIntVersionCheck();
     return this.primitiveN("uint64le", varName, options);
   }
 
-  floatle<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  floatle<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("floatle", varName, options);
   }
 
-  floatbe<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  floatbe<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("floatbe", varName, options);
   }
 
-  doublele<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  doublele<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("doublele", varName, options);
   }
 
-  doublebe<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  doublebe<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.primitiveN("doublebe", varName, options);
   }
 
-  private bitN<K extends string>(
+  private bitN<TVariableName extends string, TOutputValue = number>(
     size: BitSizes,
-    varName: K,
-    options: ParserOptions<T, any, any, any, any>
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue>
   ) {
     options.length = size;
     return this.setNextParser("bit", varName, options);
   }
 
-  bit1<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit1<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(1, varName, options);
   }
 
-  bit2<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit2<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(2, varName, options);
   }
 
-  bit3<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit3<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(3, varName, options);
   }
 
-  bit4<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit4<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(4, varName, options);
   }
 
-  bit5<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit5<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(5, varName, options);
   }
 
-  bit6<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit6<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(6, varName, options);
   }
 
-  bit7<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit7<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(7, varName, options);
   }
 
-  bit8<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit8<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(8, varName, options);
   }
 
-  bit9<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit9<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(9, varName, options);
   }
 
-  bit10<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit10<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(10, varName, options);
   }
 
-  bit11<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit11<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(11, varName, options);
   }
 
-  bit12<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit12<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(12, varName, options);
   }
 
-  bit13<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit13<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(13, varName, options);
   }
 
-  bit14<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit14<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(14, varName, options);
   }
 
-  bit15<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit15<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(15, varName, options);
   }
 
-  bit16<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit16<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(16, varName, options);
   }
 
-  bit17<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit17<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(17, varName, options);
   }
 
-  bit18<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit18<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(18, varName, options);
   }
 
-  bit19<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit19<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(19, varName, options);
   }
 
-  bit20<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit20<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(20, varName, options);
   }
 
-  bit21<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit21<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(21, varName, options);
   }
 
-  bit22<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit22<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(22, varName, options);
   }
 
-  bit23<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit23<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(23, varName, options);
   }
 
-  bit24<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit24<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(24, varName, options);
   }
 
-  bit25<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit25<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(25, varName, options);
   }
 
-  bit26<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit26<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(26, varName, options);
   }
 
-  bit27<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit27<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(27, varName, options);
   }
 
-  bit28<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit28<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(28, varName, options);
   }
 
-  bit29<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit29<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(29, varName, options);
   }
 
-  bit30<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit30<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(30, varName, options);
   }
 
-  bit31<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit31<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(31, varName, options);
   }
 
-  bit32<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any> = {}) {
+  bit32<TVariableName extends string, TOutputValue = number>(
+    varName: TVariableName,
+    options: CommonParserOptions<number, TOutputValue> = {}
+  ) {
     return this.bitN(32, varName, options);
   }
 
@@ -788,7 +1040,10 @@ export class Parser<T = {}> {
     return this.setNextParser("seek", "", { length: relOffset });
   }
 
-  string<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any>) {
+  string<TVariableName extends string, TOutputValue = string>(
+    varName: TVariableName,
+    options: StringParserOptions<T, TOutputValue>
+  ): Parser<T & Record<TVariableName, TOutputValue>> {
     if (!options.zeroTerminated && !options.length && !options.greedy) {
       throw new Error(
         "One of length, zeroTerminated, or greedy must be defined for string."
@@ -809,12 +1064,13 @@ export class Parser<T = {}> {
 
     options.encoding = options.encoding || "utf8";
 
-    return this.setNextParser("string", varName, options) as unknown as Parser<
-      T & Record<K, string>
-    >;
+    return this.setNextParser("string", varName, options);
   }
 
-  buffer<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any>) {
+  buffer<TVariableName extends string, TOutputValue = Buffer>(
+    varName: TVariableName,
+    options: BufferParserOptions<T, TOutputValue>
+  ) {
     if (!options.length && !options.readUntil) {
       throw new Error("length or readUntil must be defined for buffer.");
     }
@@ -837,7 +1093,10 @@ export class Parser<T = {}> {
     return this.setNextParser("wrapper", varName, options);
   }
 
-  array<K extends string>(varName: K, options: ParserOptions<T, any, any, any, any>) {
+  array<K extends string>(
+    varName: K,
+    options: ParserOptions<T, any, any, any, any>
+  ) {
     if (!options.readUntil && !options.length && !options.lengthInBytes) {
       throw new Error(
         "One of readUntil, length and lengthInBytes must be defined for array."
@@ -883,7 +1142,9 @@ export class Parser<T = {}> {
     TChoices extends ParserChoices,
     TDefaultChoice extends ParserChoice<unknown> | undefined = undefined
   >(
-    varName: TVariableName | ParserOptions<T, TTag, TChoices, TDefaultChoice, any>,
+    varName:
+      | TVariableName
+      | ParserOptions<T, TTag, TChoices, TDefaultChoice, any>,
     options?: ParserOptions<T, TTag, TChoices, TDefaultChoice, any>
   ):
     | Parser<ChoicesToPossibleValues<T, TTag, TChoices, TDefaultChoice>>
@@ -930,11 +1191,7 @@ export class Parser<T = {}> {
       }
     }
 
-    return this.setNextParser(
-      "choice",
-      varName as TVariableName,
-      options
-    );
+    return this.setNextParser("choice", varName as TVariableName, options);
   }
 
   nest<TVariableName extends string, TType extends string | Parser<unknown>>(
@@ -971,11 +1228,7 @@ export class Parser<T = {}> {
       );
     }
 
-    return this.setNextParser(
-      "nest",
-      varName as string,
-      options || {}
-    );
+    return this.setNextParser("nest", varName as string, options || {});
   }
 
   pointer<TVariableName extends string, TType extends Parser<unknown> | string>(
@@ -1005,11 +1258,7 @@ export class Parser<T = {}> {
     varName: TVariableName,
     options: ParserOptions<T, any, any, any, any> = {}
   ): Parser<T & Record<TVariableName, number>> {
-    return this.setNextParser(
-      "saveOffset",
-      varName,
-      options
-    );
+    return this.setNextParser("saveOffset", varName, options);
   }
 
   endianness(endianness: "little" | "big"): this {
