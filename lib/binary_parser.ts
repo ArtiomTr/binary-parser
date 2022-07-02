@@ -110,7 +110,213 @@ class Context {
 const aliasRegistry = new Map<string, Parser>();
 const FUNCTION_PREFIX = "___parser_";
 
-type LengthProperty<TParserValue> = number | keyof TParserValue | ((item: TParserValue) => number);
+type OneOf<T> = {
+  [K in keyof T]: Partial<Omit<Record<keyof T, undefined>, K>> &
+    Record<K, T[K]>;
+}[keyof T];
+
+type RequiredIf<TRecord, TValue> = TValue extends undefined
+  ? TRecord
+  : Required<TValue>;
+
+type LengthProperty<TParserValue> =
+  | number
+  | keyof TParserValue
+  | ((item: TParserValue) => number);
+type ReadUntilProperty = "eof" | ((item: number, buffer: Buffer) => boolean);
+
+// Utility type to extract only keys from TObject which are of type TType.
+type KeysOfType<TObject, TType> = {
+  // Iterate through all keys of TObject.
+  // If value under key TKey has type TType, then put TKey in that place. If not, put never.
+  [TKey in keyof TObject]: TObject[TKey] extends TType ? TKey : never;
+  // Take all values of constructed object.
+}[keyof TObject];
+
+// Base type of "tag" option in ParserOptions type.
+type ParserTag<TValue> = KeysOfType<TValue, number> | ((value: any) => number);
+// Base type for entry of "choices" option in ParserOptions type.
+type ParserChoice<TValue> = string | Parser<TValue>;
+// Base type of "choices" option in ParserOptions type.
+type ParserChoices = Record<number, ParserChoice<unknown>>;
+
+/**
+ * Utility type, used to extract concrete value from choice.
+ * Automatically handles specific "self" and "stop" string literals:
+ *   "self" - use same parser once more, which results in same value as before.
+ *   "stop" - stop parsing, results in "undefined" type.
+ * Other string literals could not be handled correctly, because named parser
+ *   are unknown during compile-time.
+ */
+type ChoiceToValue<TChoice, TSelfValue> = TChoice extends Parser<
+  infer TParserValue
+>
+  ? TParserValue
+  : TChoice extends "self"
+  ? TSelfValue
+  : TChoice extends "stop"
+  ? undefined
+  : unknown;
+
+/**
+ * Utility type, which constructs union type of all possibilities, from choices type.
+ * Output value will be written to current object.
+ * Limitations:
+ *   - using named parsers will result in "unknown" type.
+ *   - if TTag is function, union type without split on variable will be generated.
+ * @example
+ * If user specified TChoices type as:
+ * ```ts
+ * type TChoices = {
+ *   0: Parser<{ value: string }>;
+ *   1: Parser<{ otherValue: number }>;
+ *   2: 'unknown-parser'
+ * }
+ * ```
+ * TCurrentValue type as:
+ * ```ts
+ * type TCurrentValue = {
+ *   someTag: number;
+ * }
+ * ```
+ * And TTag as:
+ * ```ts
+ * type TTag = 'someTag';
+ * ```
+ * Then, return type will be:
+ * ```ts
+ * type Output = {
+ *   someTag: 0;
+ *   value: string;
+ * } | {
+ *   someTag: 1;
+ *   otherValue: number;
+ * } | {
+ *   someTag: 2;
+ * } & unknown; // limitation - cannot distinguish type.
+ * ```
+ * As you can see from the example above, one limitation exist:
+ *   When named parsers are being used, type cannot be distinguished,
+ *   because named parsers are not accessible during compile-time.
+ * @example
+ * If TChoices is:
+ * ```ts
+ * type TChoices = {
+ *   0: Parser<{ value: string }>;
+ *   1: Parser<{ anotherValue: number }>;
+ * }
+ * ```
+ * TCurrentValue is:
+ * ```ts
+ * type TCurrentValue = {
+ *   someValue: number;
+ * }
+ * ```
+ * And TTag is:
+ * ```ts
+ * type TTag = (value: TCurrentValue) => number;
+ * ```
+ * Output type will be:
+ * ```ts
+ * type Output = {
+ *   someValue: number;
+ *   value: string;
+ * } | {
+ *   someValue: number;
+ *   anotherValue: number;
+ * }
+ * ```
+ * From the example above, another limitation occurs:
+ *   When TTag is "function", the type will not be splitted by variable. As a result,
+ *   output type could have all variables from all choices at one time, what is not true.
+ */
+type ChoicesToPossibleValues<
+  // Type parameter, used to describe current parser value.
+  TCurrentValue,
+  // Type parameter, describes the criteria to choose one of specified choices.
+  TTag extends ParserTag<TCurrentValue>,
+  // Type parameter, describes all available choices.
+  TChoices extends ParserChoices,
+  // Type parameter, describes choice to pick if no other in "choices" found.
+  TDefaultChoice extends ParserChoice<unknown> | undefined
+> =
+  | {
+      // Iterating through all possible keys from TChoices type.
+      [TKey in keyof TChoices]: TTag extends keyof TCurrentValue
+        ? // If TTag is a key of TChoices object, more specific type could be generated.
+          // Removing TTag key from object, because it has more general type.
+          Omit<TCurrentValue, TTag> &
+            // Returning back TTag key to object with specific literal value.
+            Record<TTag, TKey> &
+            // Merging TCurrentValue type with properties from choice.
+            ChoiceToValue<TChoices[TKey], TCurrentValue>
+        : // If TTag is a function, specific type could not be generated - using more general type.
+          TCurrentValue & ChoiceToValue<TChoices[TKey], TCurrentValue>;
+      // Joining all values from constructed object, to get union type.
+    }[keyof TChoices]
+  // If default choice is specified, then merge it with current value.
+  | (TDefaultChoice extends undefined
+      ? never
+      : TCurrentValue & ChoiceToValue<TDefaultChoice, TCurrentValue>);
+
+/**
+ * Utility type, which constructs union type of all possibilities, from choices type.
+ * Output value will be written into new variable.
+ * Same behavior and limitations as ChoicesToPossibleValues, just output is being
+ *   written into specified variable. @see {ChoicesToPossibleValues}
+ */
+type ChoicesToPossibleFieldValues<
+  // Type parameter, used to describe current parser value.
+  TCurrentValue,
+  // Type parameter, describes the criteria to choose one of specified choices.
+  TTag extends ParserTag<TCurrentValue>,
+  // Type parameter, describes all available choices.
+  TChoices extends ParserChoices,
+  // Type parameter, which describes destination of constructed possibilities type.
+  TVariableName extends string,
+  // Type parameter, describes choice to pick if no other in "choices" found.
+  TDefaultChoice extends ParserChoice<unknown> | undefined
+> =
+  | {
+      // Iterating through all possible keys from TChoices type.
+      [TKey in keyof TChoices]: TTag extends keyof TCurrentValue
+        ? // If TTag is a key of TChoices object, more specific type could be generated.
+          // Removing TTag key from object, because it has more general type.
+          Omit<TCurrentValue, TTag> &
+            // Returning back TTag key to object with specific literal value.
+            Record<TTag, TKey> &
+            // Adding new variable to TCurrentType, which has name TVariableName, with picked choice.
+            Record<TVariableName, ChoiceToValue<TChoices[TKey], TCurrentValue>>
+        : // If TTag is a function, specific type could not be generated - using more general type.
+          TCurrentValue &
+            Record<TVariableName, ChoiceToValue<TChoices[TKey], TCurrentValue>>;
+    }
+  // If default choice is specified, then merge it with current value.
+  | (TDefaultChoice extends undefined
+      ? never
+      : TCurrentValue &
+          Record<TVariableName, ChoiceToValue<TDefaultChoice, TCurrentValue>>);
+
+type ExtractType<TType extends string | Parser<unknown>> = TType extends Parser<
+  infer TValue
+>
+  ? TValue
+  : unknown;
+
+type ContinuousParserOptions<TParserValue> = {
+  /**
+   * Length of the buffer. Can be a number, string or a function.
+   * Use number for statically sized buffers, string to reference another
+   *   variable and function to do some calculation.
+   */
+  length: LengthProperty<TParserValue>;
+  /**
+   * If "eof", then this parser will read till it reaches the end of the
+   *   Buffer/Uint8Array object. If it is a function, this parser will read
+   *   the buffer until the function returns true.
+   */
+  readUntil: ReadUntilProperty;
+};
 
 /**
  * Options that can be used in all parsers.
@@ -174,42 +380,86 @@ export type BufferParserOptions<TParserValue, TOutputValue> = {
   /**
    * By default, `buffer(name [,options])` returns a new buffer which
    *   references the same memory as the parser input, but offset and
-   *   cropped by a certain range. 
-   * If this option is true, input buffer will be cloned and a new buffer 
+   *   cropped by a certain range.
+   * If this option is true, input buffer will be cloned and a new buffer
    *   referencing a new memory region is returned.
    * @default false
    */
   clone?: boolean;
-  /** 
-   * Length of the buffer. Can be a number, string or a function. 
-   * Use number for statically sized buffers, string to reference another
-   *   variable and function to do some calculation.
-   * Either `length` or `readUntil` is required.
-   */
-  length?: LengthProperty<TParserValue>;
+} & OneOf<ContinuousParserOptions<TParserValue>> &
+  CommonParserOptions<Buffer, TOutputValue>;
+
+/**
+ * Options for "wrapped" parser.
+ */
+export type WrapperParserOptions<TParserValue, TType, TOutputValue> = {
   /**
-   * If "eof", then this parser will read till it reaches the end of the 
-   *   Buffer/Uint8Array object. If it is a function, this parser will read 
-   *   the buffer until the function returns true.
-   * Either `length` or readUntil is required. 
+   * A function taking a buffer and returning a buffer, transforming the
+   * buffer into a buffer expected by `type`.
    */
-  readUntil?: "eof" | ((item: number, buffer: Buffer) => boolean);
-} & CommonParserOptions<Buffer, TOutputValue>;
+  wrapper: (value: Buffer) => Buffer;
+  /**
+   * A `Parser` object to parse the result of wrapper.
+   */
+  type: Parser<TType>;
+} & OneOf<ContinuousParserOptions<TParserValue>> &
+  CommonParserOptions<TType, TOutputValue>;
 
-// Utility type to extract only keys from TObject which are of type TType.
-type KeysOfType<TObject, TType> = {
-  // Iterate through all keys of TObject.
-  // If value under key TKey has type TType, then put TKey in that place. If not, put never.
-  [TKey in keyof TObject]: TObject[TKey] extends TType ? TKey : never;
-  // Take all values of constructed object.
-}[keyof TObject];
+/**
+ * Options for "array" parser.
+ */
+export type ArrayParserOptions<
+  TParserValue,
+  TType extends PrimitiveTypes | Parser<unknown>,
+  TOutputValue
+> = {
+  /**
+   * Type of the array element.
+   * Can be a string or an user defined `Parser` object.
+   * If it's a string, you have to choose from `[u]int{8, 16, 32}{le, be}`.
+   */
+  type: TType;
+} & OneOf<
+  ContinuousParserOptions<TParserValue> & {
+    /**
+     * Length of the array expressed in bytes. Can be a number,
+     * string or a function. Use number for statically sized arrays.
+     */
+    lengthInBytes: LengthProperty<TParserValue>;
+  }
+> &
+  CommonParserOptions<
+    Array<TType extends Parser<infer TValue> ? TValue : number>,
+    TOutputValue
+  >;
 
-// Base type of "tag" option in ParserOptions type.
-type ParserTag<TValue> = KeysOfType<TValue, number> | ((value: any) => number);
-// Base type for entry of "choices" option in ParserOptions type.
-type ParserChoice<TValue> = string | Parser<TValue>;
-// Base type of "choices" option in ParserOptions type.
-type ParserChoices = Record<number, ParserChoice<unknown>>;
+/** Options for "choice" parser. */
+export type ChoiceParserOptions<
+  TParserValue,
+  TTag extends ParserTag<TParserValue>,
+  TChoices extends ParserChoices,
+  TDefaultChoice extends ParserChoice<unknown> | undefined
+> = {
+  /**
+   * The value used to determine which parser to use from the `choices`.
+   * Can be a string pointing to another field or a function.
+   */
+  tag: TTag;
+  /**
+   * An object which key is an integer and value is the parser which is
+   *   executed when `tag` equals the key value.
+   */
+  choices: TChoices;
+} & RequiredIf<
+  {
+    /**
+     * In case if the `tag` value doesn't match any of `choices`,
+     *   this parser is used.
+     */
+    defaultChoice?: TDefaultChoice;
+  },
+  TDefaultChoice
+>;
 
 // Type for specifying custom options for parser.
 type ParserOptions<
@@ -380,167 +630,6 @@ const PRIMITIVE_NAMES: { [key in PrimitiveTypes]: string } = {
   doublele: "Float64",
   doublebe: "Float64",
 };
-
-// Utility type, used to extract concrete value from choice.
-// Automatically handles specific "self" and "stop" string literals:
-//   "self" - use same parser once more, which results in same value as before.
-//   "stop" - stop parsing, results in "undefined" type.
-// Other string literals could not be handled correctly, because named parser
-//   are unknown during compile-time.
-type ChoiceToValue<TChoice, TSelfValue> = TChoice extends Parser<
-  infer TParserValue
->
-  ? TParserValue
-  : TChoice extends "self"
-  ? TSelfValue
-  : TChoice extends "stop"
-  ? undefined
-  : unknown;
-
-/**
- * Utility type, which constructs union type of all possibilities, from choices type.
- * Output value will be written to current object.
- * Limitations:
- *   - using named parsers will result in "unknown" type.
- *   - if TTag is function, union type without split on variable will be generated.
- * @example
- * If user specified TChoices type as:
- * ```ts
- * type TChoices = {
- *   0: Parser<{ value: string }>;
- *   1: Parser<{ otherValue: number }>;
- *   2: 'unknown-parser'
- * }
- * ```
- * TCurrentValue type as:
- * ```ts
- * type TCurrentValue = {
- *   someTag: number;
- * }
- * ```
- * And TTag as:
- * ```ts
- * type TTag = 'someTag';
- * ```
- * Then, return type will be:
- * ```ts
- * type Output = {
- *   someTag: 0;
- *   value: string;
- * } | {
- *   someTag: 1;
- *   otherValue: number;
- * } | {
- *   someTag: 2;
- * } & unknown; // limitation - cannot distinguish type.
- * ```
- * As you can see from the example above, one limitation exist:
- *   When named parsers are being used, type cannot be distinguished,
- *   because named parsers are not accessible during compile-time.
- * @example
- * If TChoices is:
- * ```ts
- * type TChoices = {
- *   0: Parser<{ value: string }>;
- *   1: Parser<{ anotherValue: number }>;
- * }
- * ```
- * TCurrentValue is:
- * ```ts
- * type TCurrentValue = {
- *   someValue: number;
- * }
- * ```
- * And TTag is:
- * ```ts
- * type TTag = (value: TCurrentValue) => number;
- * ```
- * Output type will be:
- * ```ts
- * type Output = {
- *   someValue: number;
- *   value: string;
- * } | {
- *   someValue: number;
- *   anotherValue: number;
- * }
- * ```
- * From the example above, another limitation occurs:
- *   When TTag is "function", the type will not be splitted by variable. As a result,
- *   output type could have all variables from all choices at one time, what is not true.
- */
-type ChoicesToPossibleValues<
-  // Type parameter, used to describe current parser value.
-  TCurrentValue,
-  // Type parameter, describes the criteria to choose one of specified choices.
-  TTag extends ParserTag<TCurrentValue>,
-  // Type parameter, describes all available choices.
-  TChoices extends ParserChoices,
-  // Type parameter, describes choice to pick if no other in "choices" found.
-  TDefaultChoice extends ParserChoice<unknown> | undefined
-> =
-  | {
-      // Iterating through all possible keys from TChoices type.
-      [TKey in keyof TChoices]: TTag extends keyof TCurrentValue
-        ? // If TTag is a key of TChoices object, more specific type could be generated.
-          // Removing TTag key from object, because it has more general type.
-          Omit<TCurrentValue, TTag> &
-            // Returning back TTag key to object with specific literal value.
-            Record<TTag, TKey> &
-            // Merging TCurrentValue type with properties from choice.
-            ChoiceToValue<TChoices[TKey], TCurrentValue>
-        : // If TTag is a function, specific type could not be generated - using more general type.
-          TCurrentValue & ChoiceToValue<TChoices[TKey], TCurrentValue>;
-      // Joining all values from constructed object, to get union type.
-    }[keyof TChoices]
-  // If default choice is specified, then merge it with current value.
-  | (TDefaultChoice extends undefined
-      ? never
-      : TCurrentValue & ChoiceToValue<TDefaultChoice, TCurrentValue>);
-
-/**
- * Utility type, which constructs union type of all possibilities, from choices type.
- * Output value will be written into new variable.
- * Same behavior and limitations as ChoicesToPossibleValues, just output is being
- *   written into specified variable. @see {ChoicesToPossibleValues}
- */
-type ChoicesToPossibleFieldValues<
-  // Type parameter, used to describe current parser value.
-  TCurrentValue,
-  // Type parameter, describes the criteria to choose one of specified choices.
-  TTag extends ParserTag<TCurrentValue>,
-  // Type parameter, describes all available choices.
-  TChoices extends ParserChoices,
-  // Type parameter, which describes destination of constructed possibilities type.
-  TVariableName extends string,
-  // Type parameter, describes choice to pick if no other in "choices" found.
-  TDefaultChoice extends ParserChoice<unknown> | undefined
-> =
-  | {
-      // Iterating through all possible keys from TChoices type.
-      [TKey in keyof TChoices]: TTag extends keyof TCurrentValue
-        ? // If TTag is a key of TChoices object, more specific type could be generated.
-          // Removing TTag key from object, because it has more general type.
-          Omit<TCurrentValue, TTag> &
-            // Returning back TTag key to object with specific literal value.
-            Record<TTag, TKey> &
-            // Adding new variable to TCurrentType, which has name TVariableName, with picked choice.
-            Record<TVariableName, ChoiceToValue<TChoices[TKey], TCurrentValue>>
-        : // If TTag is a function, specific type could not be generated - using more general type.
-          TCurrentValue &
-            Record<TVariableName, ChoiceToValue<TChoices[TKey], TCurrentValue>>;
-    }
-  // If default choice is specified, then merge it with current value.
-  | (TDefaultChoice extends undefined
-      ? never
-      : TCurrentValue &
-          Record<TVariableName, ChoiceToValue<TDefaultChoice, TCurrentValue>>);
-
-type ExtractType<TType extends string | Parser<unknown>> = TType extends Parser<
-  infer TValue
->
-  ? TValue
-  : unknown;
 
 const PRIMITIVE_LITTLE_ENDIANS: { [key in PrimitiveTypes]: boolean } = {
   uint8: false,
@@ -1078,10 +1167,10 @@ export class Parser<T = {}> {
     return this.setNextParser("buffer", varName, options);
   }
 
-  wrapped<TVariableName extends string, TType extends string | Parser<unknown>>(
+  wrapped<TVariableName extends string, TType, TOutputValue = TType>(
     varName: TVariableName,
-    options: ParserOptions<T, any, any, any, TType>
-  ): Parser<T & Record<TVariableName, ExtractType<TType>>> {
+    options: WrapperParserOptions<T, TType, TOutputValue>
+  ): Parser<T & Record<TVariableName, TOutputValue>> {
     if (!options.length && !options.readUntil) {
       throw new Error("length or readUntil must be defined for wrapped.");
     }
@@ -1093,9 +1182,13 @@ export class Parser<T = {}> {
     return this.setNextParser("wrapper", varName, options);
   }
 
-  array<K extends string>(
-    varName: K,
-    options: ParserOptions<T, any, any, any, any>
+  array<
+    TVariableName extends string,
+    TType extends PrimitiveTypes | Parser<unknown>,
+    TOutputValue = Array<TType extends Parser<infer TValue> ? TValue : number>
+  >(
+    varName: TVariableName,
+    options: ArrayParserOptions<T, TType, TOutputValue>
   ) {
     if (!options.readUntil && !options.length && !options.lengthInBytes) {
       throw new Error(
