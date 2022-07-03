@@ -110,10 +110,71 @@ class Context {
 const aliasRegistry = new Map<string, Parser>();
 const FUNCTION_PREFIX = "___parser_";
 
+/**
+ * Function type, that returns same type as receives.
+ */
+type DefaultFormatter<TPossibilities> = {
+  [TKey in keyof TPossibilities]: (
+    value: TPossibilities[TKey]
+  ) => TPossibilities[TKey];
+}[keyof TPossibilities];
+
+type ExtractMapperType<TFn, TInput> = TFn extends (
+  value: TInput
+) => infer TValue
+  ? TValue
+  : TFn extends {
+      (value: TInput): infer TValue;
+    }
+  ? TValue
+  : never;
+
+/**
+ * Utility type, used to convert one type to another, using mapper type.
+ * Each field of `TInput` will be converted by `TMapper` type.
+ * @example
+ * ```ts
+ * type Input = {
+ *   value: number;
+ *   otherValue: string;
+ * }
+ *
+ * // Mapping function, that maps all number values into Date, and all string values to number.
+ * type CustomMapper = ((value: number) => Date) | ((value: string) => number);
+ *
+ * type MappedInput = Mapping<Input, CustomMapper>;
+ *
+ * // MappedInput now looks like:
+ * // type MappedInput = {
+ * //   value: Date;
+ * //   otherValue: number;
+ * // }
+ * ```
+ */
+type Mapping<TInput, TMapper> = {
+  [TKey in keyof TInput]: ExtractMapperType<TMapper, TInput[TKey]>;
+};
+
+type SplitBy<
+  TRecord,
+  TTagKey extends keyof TRecord,
+  TChoices extends string | number | symbol
+> = {
+  [TKey in TChoices]: Omit<TRecord, TTagKey> & Record<TTagKey, TKey>;
+};
+
+type MergeTypes<TFirst, TSecond extends Record<keyof TFirst, unknown>> = {
+  [TKey in keyof TFirst]: TFirst[TKey] & TSecond[TKey];
+};
+
 type OneOf<T> = {
   [K in keyof T]: Partial<Omit<Record<keyof T, undefined>, K>> &
     Record<K, T[K]>;
 }[keyof T];
+
+type PutUnderField<TRecord, TField extends string> = {
+  [TKey in keyof TRecord]: Record<TField, TRecord[TKey]>;
+};
 
 type RequiredIf<TRecord, TValue> = TValue extends undefined
   ? TRecord
@@ -140,23 +201,22 @@ type ParserChoice<TValue> = string | Parser<TValue>;
 // Base type of "choices" option in ParserOptions type.
 type ParserChoices = Record<number, ParserChoice<unknown>>;
 
+type ChoiceToValue<TChoice, TEmpty> = TChoice extends Parser<infer TParserValue>
+  ? TParserValue
+  : TChoice extends "stop"
+  ? TEmpty
+  : unknown;
+
 /**
  * Utility type, used to extract concrete value from choice.
- * Automatically handles specific "self" and "stop" string literals:
- *   "self" - use same parser once more, which results in same value as before.
+ * Automatically handles specific string literals:
  *   "stop" - stop parsing, results in "undefined" type.
- * Other string literals could not be handled correctly, because named parser
+ * Other string literals could not be handled correctly, because named parsers
  *   are unknown during compile-time.
  */
-type ChoiceToValue<TChoice, TSelfValue> = TChoice extends Parser<
-  infer TParserValue
->
-  ? TParserValue
-  : TChoice extends "self"
-  ? TSelfValue
-  : TChoice extends "stop"
-  ? undefined
-  : unknown;
+type ChoicesToValues<TChoices extends ParserChoices, TEmpty> = {
+  [TKey in keyof TChoices]: ChoiceToValue<TChoices[TKey], TEmpty>;
+};
 
 /**
  * Utility type, which constructs union type of all possibilities, from choices type.
@@ -238,26 +298,20 @@ type ChoicesToPossibleValues<
   // Type parameter, describes all available choices.
   TChoices extends ParserChoices,
   // Type parameter, describes choice to pick if no other in "choices" found.
-  TDefaultChoice extends ParserChoice<unknown> | undefined
+  TDefaultChoice extends ParserChoice<unknown> | undefined,
+  TFormatter
 > =
-  | {
-      // Iterating through all possible keys from TChoices type.
-      [TKey in keyof TChoices]: TTag extends keyof TCurrentValue
-        ? // If TTag is a key of TChoices object, more specific type could be generated.
-          // Removing TTag key from object, because it has more general type.
-          Omit<TCurrentValue, TTag> &
-            // Returning back TTag key to object with specific literal value.
-            Record<TTag, TKey> &
-            // Merging TCurrentValue type with properties from choice.
-            ChoiceToValue<TChoices[TKey], TCurrentValue>
-        : // If TTag is a function, specific type could not be generated - using more general type.
-          TCurrentValue & ChoiceToValue<TChoices[TKey], TCurrentValue>;
-      // Joining all values from constructed object, to get union type.
-    }[keyof TChoices]
-  // If default choice is specified, then merge it with current value.
+  | (TTag extends keyof TCurrentValue
+      ? MergeTypes<
+          SplitBy<TCurrentValue, TTag, keyof TChoices>,
+          Mapping<ChoicesToValues<TChoices, {}>, TFormatter>
+        >[keyof TChoices]
+      : TCurrentValue &
+          Mapping<ChoicesToValues<TChoices, {}>, TFormatter>[keyof TChoices])
   | (TDefaultChoice extends undefined
       ? never
-      : TCurrentValue & ChoiceToValue<TDefaultChoice, TCurrentValue>);
+      : TCurrentValue &
+          ExtractMapperType<TFormatter, ChoiceToValue<TDefaultChoice, {}>>);
 
 /**
  * Utility type, which constructs union type of all possibilities, from choices type.
@@ -266,42 +320,47 @@ type ChoicesToPossibleValues<
  *   written into specified variable. @see {ChoicesToPossibleValues}
  */
 type ChoicesToPossibleFieldValues<
+  // Type parameter, which describes destination of constructed possibilities type.
+  TVariableName extends string,
   // Type parameter, used to describe current parser value.
   TCurrentValue,
   // Type parameter, describes the criteria to choose one of specified choices.
   TTag extends ParserTag<TCurrentValue>,
   // Type parameter, describes all available choices.
   TChoices extends ParserChoices,
-  // Type parameter, which describes destination of constructed possibilities type.
-  TVariableName extends string,
   // Type parameter, describes choice to pick if no other in "choices" found.
-  TDefaultChoice extends ParserChoice<unknown> | undefined
+  TDefaultChoice extends ParserChoice<unknown> | undefined,
+  TFormatter
 > =
-  | {
-      // Iterating through all possible keys from TChoices type.
-      [TKey in keyof TChoices]: TTag extends keyof TCurrentValue
-        ? // If TTag is a key of TChoices object, more specific type could be generated.
-          // Removing TTag key from object, because it has more general type.
-          Omit<TCurrentValue, TTag> &
-            // Returning back TTag key to object with specific literal value.
-            Record<TTag, TKey> &
-            // Adding new variable to TCurrentType, which has name TVariableName, with picked choice.
-            Record<TVariableName, ChoiceToValue<TChoices[TKey], TCurrentValue>>
-        : // If TTag is a function, specific type could not be generated - using more general type.
-          TCurrentValue &
-            Record<TVariableName, ChoiceToValue<TChoices[TKey], TCurrentValue>>;
-    }
-  // If default choice is specified, then merge it with current value.
+  | (TTag extends keyof TCurrentValue
+      ? MergeTypes<
+          SplitBy<TCurrentValue, TTag, keyof TChoices>,
+          PutUnderField<
+            Mapping<ChoicesToValues<TChoices, undefined>, TFormatter>,
+            TVariableName
+          >
+        >[keyof TChoices]
+      : TCurrentValue &
+          Record<
+            TVariableName,
+            Mapping<
+              ChoicesToValues<TChoices, undefined>,
+              TFormatter
+            >[keyof TChoices]
+          >)
   | (TDefaultChoice extends undefined
       ? never
       : TCurrentValue &
-          Record<TVariableName, ChoiceToValue<TDefaultChoice, TCurrentValue>>);
+          Record<
+            TVariableName,
+            ExtractMapperType<
+              TFormatter,
+              ChoiceToValue<TDefaultChoice, undefined>
+            >
+          >);
 
-type ExtractType<TType extends string | Parser<unknown>> = TType extends Parser<
-  infer TValue
->
-  ? TValue
-  : unknown;
+type ExtractParserValue<TType extends string | Parser<unknown>> =
+  TType extends Parser<infer TValue> ? TValue : unknown;
 
 type ContinuousParserOptions<TParserValue> = {
   /**
@@ -438,7 +497,8 @@ export type ChoiceParserOptions<
   TParserValue,
   TTag extends ParserTag<TParserValue>,
   TChoices extends ParserChoices,
-  TDefaultChoice extends ParserChoice<unknown> | undefined
+  TDefaultChoice extends ParserChoice<unknown> | undefined,
+  TFormatter
 > = {
   /**
    * The value used to determine which parser to use from the `choices`.
@@ -450,6 +510,10 @@ export type ChoiceParserOptions<
    *   executed when `tag` equals the key value.
    */
   choices: TChoices;
+  /**
+   * Function that transforms the parsed value into a more desired form.
+   */
+  formatter?: TFormatter;
 } & RequiredIf<
   {
     /**
@@ -459,7 +523,8 @@ export type ChoiceParserOptions<
     defaultChoice?: TDefaultChoice;
   },
   TDefaultChoice
->;
+> &
+  Omit<CommonParserOptions<TChoices[keyof TChoices], unknown>, "formatter">;
 
 // Type for specifying custom options for parser.
 type ParserOptions<
@@ -1214,45 +1279,62 @@ export class Parser<T = {}> {
   choice<
     TTag extends ParserTag<T>,
     TChoices extends ParserChoices,
-    TDefaultChoice extends ParserChoice<unknown> | undefined = undefined
+    TDefaultChoice extends ParserChoice<unknown> | undefined = undefined,
+    TFormatter = DefaultFormatter<TChoices>
   >(
-    options: ParserOptions<T, TTag, TChoices, TDefaultChoice, any>
-  ): Parser<ChoicesToPossibleValues<T, TTag, TChoices, TDefaultChoice>>;
-
-  choice<
-    K extends string,
-    TTag extends ParserTag<T>,
-    TChoices extends ParserChoices,
-    TDefaultChoice extends ParserChoice<unknown> | undefined = undefined
-  >(
-    varName: K,
-    options: ParserOptions<T, TTag, TChoices, TDefaultChoice, any>
-  ): Parser<ChoicesToPossibleFieldValues<T, TTag, TChoices, K, TDefaultChoice>>;
+    options: ChoiceParserOptions<T, TTag, TChoices, TDefaultChoice, TFormatter>
+  ): Parser<
+    ChoicesToPossibleValues<T, TTag, TChoices, TDefaultChoice, TFormatter>
+  >;
 
   choice<
     TVariableName extends string,
     TTag extends ParserTag<T>,
     TChoices extends ParserChoices,
-    TDefaultChoice extends ParserChoice<unknown> | undefined = undefined
+    TDefaultChoice extends ParserChoice<unknown> | undefined = undefined,
+    TFormatter = DefaultFormatter<TChoices>
+  >(
+    varName: TVariableName,
+    options: ChoiceParserOptions<T, TTag, TChoices, TDefaultChoice, TFormatter>
+  ): Parser<
+    ChoicesToPossibleFieldValues<
+      TVariableName,
+      T,
+      TTag,
+      TChoices,
+      TDefaultChoice,
+      TFormatter
+    >
+  >;
+
+  choice<
+    TVariableName extends string,
+    TTag extends ParserTag<T>,
+    TChoices extends ParserChoices,
+    TDefaultChoice extends ParserChoice<unknown> | undefined = undefined,
+    TFormatter = DefaultFormatter<TChoices>
   >(
     varName:
       | TVariableName
-      | ParserOptions<T, TTag, TChoices, TDefaultChoice, any>,
-    options?: ParserOptions<T, TTag, TChoices, TDefaultChoice, any>
+      | ChoiceParserOptions<T, TTag, TChoices, TDefaultChoice, TFormatter>,
+    options?: ChoiceParserOptions<T, TTag, TChoices, TDefaultChoice, TFormatter>
   ):
-    | Parser<ChoicesToPossibleValues<T, TTag, TChoices, TDefaultChoice>>
+    | Parser<
+        ChoicesToPossibleValues<T, TTag, TChoices, TDefaultChoice, TFormatter>
+      >
     | Parser<
         ChoicesToPossibleFieldValues<
+          TVariableName,
           T,
           TTag,
           TChoices,
-          TVariableName,
-          TDefaultChoice
+          TDefaultChoice,
+          TFormatter
         >
       > {
     if (typeof options !== "object" && typeof varName === "object") {
       options = varName;
-      varName = "";
+      varName = "" as TVariableName;
     }
 
     if (!options) {
@@ -1290,18 +1372,18 @@ export class Parser<T = {}> {
   nest<TVariableName extends string, TType extends string | Parser<unknown>>(
     varName: TVariableName,
     options: ParserOptions<T, any, any, any, TType>
-  ): Parser<T & Record<TVariableName, ExtractType<TType>>>;
+  ): Parser<T & Record<TVariableName, ExtractParserValue<TType>>>;
 
   nest<TType extends string | Parser<unknown>>(
     options: ParserOptions<T, any, any, any, TType>
-  ): Parser<T & ExtractType<TType>>;
+  ): Parser<T & ExtractParserValue<TType>>;
 
   nest<TVariableName extends string, TType extends string | Parser<unknown>>(
     varName: TVariableName,
     options?: ParserOptions<T, any, any, any, TType>
   ):
-    | Parser<T & ExtractType<TType>>
-    | Parser<T & Record<TVariableName, ExtractType<TType>>> {
+    | Parser<T & ExtractParserValue<TType>>
+    | Parser<T & Record<TVariableName, ExtractParserValue<TType>>> {
     if (typeof options !== "object" && typeof varName === "object") {
       options = varName;
       varName = "" as TVariableName;
@@ -1327,7 +1409,7 @@ export class Parser<T = {}> {
   pointer<TVariableName extends string, TType extends Parser<unknown> | string>(
     varName: TVariableName,
     options: ParserOptions<T, any, any, any, TType>
-  ): Parser<T & Record<TVariableName, ExtractType<TType>>> {
+  ): Parser<T & Record<TVariableName, ExtractParserValue<TType>>> {
     if (!options.offset) {
       throw new Error("offset is required for pointer.");
     }
