@@ -492,8 +492,8 @@ export type ArrayParserOptions<
     TOutputValue
   >;
 
-/** 
- * Options for "choice" parser. 
+/**
+ * Options for "choice" parser.
  */
 export type ChoiceParserOptions<
   TParserValue,
@@ -537,6 +537,29 @@ export type NestParserOptions<TNestedParserValue, TOutputValue> = {
    */
   type: Parser<TNestedParserValue>;
 } & CommonParserOptions<TNestedParserValue, TOutputValue>;
+
+/**
+ * Options for "pointer" parser.
+ */
+export type PointerParserOptions<
+  TParserValue,
+  TType extends PrimitiveTypes | Parser<unknown>,
+  TOutputValue
+> = {
+  /**
+   * Parser to execute.
+   * Can be a string `[u]int{8, 16, 32, 64}{le, be}` or an user defined `Parser` object.
+   */
+  type: TType;
+  /**
+   * Indicates absolute offset from the beginning of the input buffer.
+   * Can be a number, string or a function.
+   */
+  offset: LengthProperty<TParserValue>;
+} & CommonParserOptions<
+  TType extends Parser<infer TValue> ? TValue : number,
+  TOutputValue
+>;
 
 // Type for specifying custom options for parser.
 type ParserOptions<
@@ -1418,10 +1441,14 @@ export class Parser<T = {}> {
     return this.setNextParser("nest", varName as string, options || {});
   }
 
-  pointer<TVariableName extends string, TType extends Parser<unknown> | string>(
+  pointer<
+    TVariableName extends string,
+    TType extends Parser<unknown> | PrimitiveTypes,
+    TOutputValue = TType extends Parser<infer TValue> ? TValue : number
+  >(
     varName: TVariableName,
-    options: ParserOptions<T, any, any, any, TType>
-  ): Parser<T & Record<TVariableName, ExtractParserValue<TType>>> {
+    options: PointerParserOptions<T, TType, TOutputValue>
+  ): Parser<T & Record<TVariableName, TOutputValue>> {
     if (!options.offset) {
       throw new Error("offset is required for pointer.");
     }
