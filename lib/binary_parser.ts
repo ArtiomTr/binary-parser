@@ -492,7 +492,9 @@ export type ArrayParserOptions<
     TOutputValue
   >;
 
-/** Options for "choice" parser. */
+/** 
+ * Options for "choice" parser. 
+ */
 export type ChoiceParserOptions<
   TParserValue,
   TTag extends ParserTag<TParserValue>,
@@ -525,6 +527,16 @@ export type ChoiceParserOptions<
   TDefaultChoice
 > &
   Omit<CommonParserOptions<TChoices[keyof TChoices], unknown>, "formatter">;
+
+/**
+ * Options for "nest" parser.
+ */
+export type NestParserOptions<TNestedParserValue, TOutputValue> = {
+  /**
+   * A `Parser` object.
+   */
+  type: Parser<TNestedParserValue>;
+} & CommonParserOptions<TNestedParserValue, TOutputValue>;
 
 // Type for specifying custom options for parser.
 type ParserOptions<
@@ -1369,21 +1381,21 @@ export class Parser<T = {}> {
     return this.setNextParser("choice", varName as TVariableName, options);
   }
 
-  nest<TVariableName extends string, TType extends string | Parser<unknown>>(
+  nest<TVariableName extends string, TType, TOutputValue = TType>(
     varName: TVariableName,
-    options: ParserOptions<T, any, any, any, TType>
-  ): Parser<T & Record<TVariableName, ExtractParserValue<TType>>>;
+    options: NestParserOptions<TType, TOutputValue>
+  ): Parser<T & Record<TVariableName, TOutputValue>>;
 
-  nest<TType extends string | Parser<unknown>>(
-    options: ParserOptions<T, any, any, any, TType>
-  ): Parser<T & ExtractParserValue<TType>>;
+  nest<TType, TOutputValue = TType>(
+    options: NestParserOptions<TType, TOutputValue>
+  ): Parser<T & TOutputValue>;
 
-  nest<TVariableName extends string, TType extends string | Parser<unknown>>(
-    varName: TVariableName,
-    options?: ParserOptions<T, any, any, any, TType>
+  nest<TVariableName extends string, TType, TOutputValue = TType>(
+    varName: TVariableName | NestParserOptions<TType, TOutputValue>,
+    options?: NestParserOptions<TType, TOutputValue>
   ):
-    | Parser<T & ExtractParserValue<TType>>
-    | Parser<T & Record<TVariableName, ExtractParserValue<TType>>> {
+    | Parser<T & TOutputValue>
+    | Parser<T & Record<TVariableName, TOutputValue>> {
     if (typeof options !== "object" && typeof varName === "object") {
       options = varName;
       varName = "" as TVariableName;
