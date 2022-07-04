@@ -119,13 +119,39 @@ type DefaultFormatter<TPossibilities> = {
   ) => TPossibilities[TKey];
 }[keyof TPossibilities];
 
+/**
+ * Utility type, which returns return type of function TFn if type of first
+ *   argument is TInput.
+ * If function doesn't accept TInput as argument, returns never.
+ * Supports only union types, not overloads.
+ * @example
+ * ```ts
+ * type FancyFunction =
+ *   | ((value: boolean) => number)
+ *   | ((value: Date) => string);
+ *
+ * type Output1 = ExtractMapperType<FancyFunction, Date>; // output is string
+ * type Output2 = ExtractMapperType<FancyFunction, boolean>; // output is number
+ * type Output3 = ExtractMapperType<FancyFunction, string>; // output is never
+ * ```
+ * There is no possible way to iterate through all overloads, so for overloaded
+ *   functions, only first matching signature will be used.
+ * @example
+ * ```ts
+ * // Type of function that has several overloads.
+ * interface FancyFunction {
+ *   (value: boolean): number;
+ *   (value: Date): string;
+ * }
+ *
+ * type Output1 = ExtractMapperType<FancyFunction, Date>; // output is string
+ * type Output2 = ExtractMapperType<FancyFunction, boolean>; // output is never
+ * type Output3 = ExtractMapperType<FancyFunction, string>; // output is never
+ * ```
+ */
 type ExtractMapperType<TFn, TInput> = TFn extends (
   value: TInput
 ) => infer TValue
-  ? TValue
-  : TFn extends {
-      (value: TInput): infer TValue;
-    }
   ? TValue
   : never;
 
@@ -155,6 +181,32 @@ type Mapping<TInput, TMapper> = {
   [TKey in keyof TInput]: ExtractMapperType<TMapper, TInput[TKey]>;
 };
 
+/**
+ * Utility type, used to generate record of possibilities.
+ * The record of possibilities is a record, where key is item from TChoices
+ *   tuple, and value is TRecord type, with edited type of TTagKey field.
+ * @example
+ * ```ts
+ * type SomeType = {
+ *   value: number;
+ *   otherValue: string;
+ * }
+ *
+ * type OutputType = SplitBy<SomeType, 'value', 0 | 1>;
+ *
+ * // The OutputType is:
+ * // type OutputType = {
+ * //   0: {
+ * //     value: 0;
+ * //     otherValue: string;
+ * //   };
+ * //   1: {
+ * //     value: 1;
+ * //     otherValue: string;
+ * //   }
+ * // }
+ * ```
+ */
 type SplitBy<
   TRecord,
   TTagKey extends keyof TRecord,
@@ -163,14 +215,55 @@ type SplitBy<
   [TKey in TChoices]: Omit<TRecord, TTagKey> & Record<TTagKey, TKey>;
 };
 
-type MergeTypes<TFirst, TSecond extends Record<keyof TFirst, unknown>> = {
+/**
+ * Utility type, which merges the types of fields of two records.
+ * @example
+ * ```ts
+ * type First = {
+ *   value: {
+ *     hello: string;
+ *     bye: number;
+ *   };
+ *   second: {}
+ * }
+ *
+ * type Second = {
+ *   value: {
+ *     other: Date;
+ *   };
+ *   second: {
+ *     hello: string;
+ *   }
+ * }
+ *
+ * type Output = MergeRecords<First, Second>;
+ * // The Output is:
+ * // type Output = {
+ * //   value: {
+ * //     hello: string;
+ * //     bye: number;
+ * //     other: Date;
+ * //   };
+ * //   second: {
+ * //     hello: string;
+ * //   };
+ * // };
+ * ```
+ */
+type MergeRecords<TFirst, TSecond extends Record<keyof TFirst, unknown>> = {
   [TKey in keyof TFirst]: TFirst[TKey] & TSecond[TKey];
 };
 
-type OneOf<T> = {
-  [K in keyof T]: Partial<Omit<Record<keyof T, undefined>, K>> &
-    Record<K, T[K]>;
-}[keyof T];
+/**
+ * Utility type, that takes record type and returns new union type, where only
+ *   one field of input record is required.
+ */
+type OneOf<TRecord> = {
+  [TKey in keyof TRecord]: Partial<
+    Omit<Record<keyof TRecord, undefined>, TKey>
+  > &
+    Record<TKey, TRecord[TKey]>;
+}[keyof TRecord];
 
 type PutUnderField<TRecord, TField extends string> = {
   [TKey in keyof TRecord]: Record<TField, TRecord[TKey]>;
@@ -186,7 +279,9 @@ type LengthProperty<TParserValue> =
   | ((item: unknown) => number);
 type ReadUntilProperty = "eof" | ((item: number, buffer: Buffer) => boolean);
 
-// Utility type to extract only keys from TObject which are of type TType.
+/**
+ * Utility type to extract only keys from TObject which are of type TType.
+ */
 type KeysOfType<TObject, TType> = {
   // Iterate through all keys of TObject.
   // If value under key TKey has type TType, then put TKey in that place. If not, put never.
@@ -194,11 +289,17 @@ type KeysOfType<TObject, TType> = {
   // Take all values of constructed object.
 }[keyof TObject];
 
-// Base type of "tag" option in ParserOptions type.
+/**
+ * Base type of "tag" option in ParserOptions type.
+ */
 type ParserTag<TValue> = KeysOfType<TValue, number> | ((value: any) => number);
-// Base type for entry of "choices" option in ParserOptions type.
+/**
+ * Base type for entry of "choices" option in ParserOptions type.
+ */
 type ParserChoice<TValue> = string | Parser<TValue>;
-// Base type of "choices" option in ParserOptions type.
+/**
+ * Base type of "choices" option in ParserOptions type.
+ */
 type ParserChoices = Record<number, ParserChoice<unknown>>;
 
 type ChoiceToValue<TChoice, TEmpty> = TChoice extends Parser<infer TParserValue>
@@ -302,7 +403,7 @@ type ChoicesToPossibleValues<
   TFormatter
 > =
   | (TTag extends keyof TCurrentValue
-      ? MergeTypes<
+      ? MergeRecords<
           SplitBy<TCurrentValue, TTag, keyof TChoices>,
           Mapping<ChoicesToValues<TChoices, {}>, TFormatter>
         >[keyof TChoices]
@@ -333,7 +434,7 @@ type ChoicesToPossibleFieldValues<
   TFormatter
 > =
   | (TTag extends keyof TCurrentValue
-      ? MergeTypes<
+      ? MergeRecords<
           SplitBy<TCurrentValue, TTag, keyof TChoices>,
           PutUnderField<
             Mapping<ChoicesToValues<TChoices, undefined>, TFormatter>,
@@ -616,7 +717,7 @@ type ParserTypeToOptions<TOutputValue> = Record<
   wrapper: WrapperParserOptions<unknown, unknown, TOutputValue>;
 };
 
-type ParserConstraint = MergeTypes<
+type ParserConstraint = MergeRecords<
   SplitBy<{ type: Types }, "type", Types>,
   PutUnderField<{ [K in Types]: Parser<unknown, K> }, "parser">
 >[Types];
